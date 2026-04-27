@@ -1,0 +1,14 @@
+[project]
+name = "information-sanitizer-agent"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "langchain>=1.2.15",
+    "langchain-core>=1.3.2",
+    "langchain-openai>=1.2.1",
+    "langgraph>=1.1.9",
+    "pydantic>=2.13.3",
+    "python-dotenv>=1.2.2",
+]
