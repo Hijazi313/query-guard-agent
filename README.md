@@ -23,18 +23,18 @@ The pipeline is a directed LangGraph graph with conditional routing:
 
 ```
 extractor → validator → [corrector → increment_retry → validator → ...]
-                                  ↘ llm_correction → increment_retry → ...
-                                                                      ↘ END
+                  ↘ [llm_correction → increment_retry → validator → ...]
+                  ↘ [llm_city_corrector_from_list → END]
 ```
 
 **Nodes:**
 
 - `extractor` — structured LLM extraction via `with_structured_output` + Pydantic schema
 - `validator` — deterministic rule checks against a known city/country dataset
-- `corrector` — fuzzy string matching via `difflib.get_close_matches`
-- `llm_correction` — LLM-based city name inference as a fallback
-- `apply_llm_guess` — merges the LLM's guess back into state
-- `increment_retry` — guards against infinite correction loops (MAX_RETRY = 2)
+- `corrector` — fuzzy string matching with deterministic similarity scoring
+- `llm_correction` — general LLM-based city name inference for semantic errors
+- `llm_city_corrector_from_list` — constrained LLM fallback using top-10 fuzzy candidates
+- `increment_retry` — guards against infinite loops (MAX_RETRY = 2)
 
 **State shape (`SanitizerState`):**
 
@@ -112,38 +112,17 @@ Core pipeline is stable. Planned next:
 
 - [x] Structured LLM extraction with Pydantic schema
 - [x] Deterministic validation against static city/country dataset
-- [x] Fuzzy string correction (difflib) as first-pass corrector
-- [x] LLM-based city inference as fallback corrector
+- [x] Fuzzy string correction with calibrated similarity scoring
+- [x] LLM-based city inference (General & List-constrained fallbacks)
+- [x] **Confidence-aware routing** (High/Medium/Low buckets)
+- [x] **Graph Optimization**: Removed redundant nodes, moved state updates to source
 - [x] Retry counter guard (MAX_RETRY) to prevent infinite loops
 - [x] Graceful failure — pipeline never crashes, exits with error state
-- [x] Debug wrapper on every node for traceability
 - [x] UV Project Migration (Modern, stable package management)
 
 ---
 
 ### Planned
-
-#### Confidence-aware correction
-
-Right now the pipeline treats all corrections as binary — valid or not.
-The next step is attaching a confidence score to every correction decision:
-
-```json
-{
-  "city": "dubai",
-  "confidence": 0.82,
-  "source": "llm_correction"
-}
-```
-
-This unlocks a three-way routing decision after correction:
-
-- confidence >= 0.85 → accept, continue pipeline
-- confidence 0.5–0.85 → flag for human review
-- confidence < 0.5 → reject, trigger human-in-the-loop
-
-The `source` field matters too — a fuzzy match at 0.75 is more reliable
-than an LLM guess at 0.75. Confidence should be weighted by source.
 
 #### Human-in-the-loop (HITL) node
 
