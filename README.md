@@ -53,6 +53,7 @@ The graph routes conditionally based on validation outcome and retry count. Vali
 | Structured output | Pydantic + `with_structured_output` |
 | Fuzzy matching    | `difflib.get_close_matches`         |
 | State management  | `TypedDict` + LangGraph state       |
+| Package Manager   | UV (Fast Python package installer)  |
 
 ---
 
@@ -72,11 +73,14 @@ The validator checks against a static dataset, not the LLM. This makes failures 
 ## Run it
 
 ```bash
-git clone https://github.com/yourusername/query-sanitizer
-cd query-sanitizer
-pip install -r requirements.txt
+# Clone the repository
+git clone https://github.com/Hijazi313/queryguard-agen
+cd queryguard-agent
+
+# Install dependencies and run (using uv)
+uv sync
 cp .env.example .env  # add your OPENAI_API_KEY
-python main.py
+uv run main.py
 ```
 
 ---
@@ -102,6 +106,7 @@ Core pipeline is stable. Planned next:
 - [x] Retry counter guard (MAX_RETRY) to prevent infinite loops
 - [x] Graceful failure — pipeline never crashes, exits with error state
 - [x] Debug wrapper on every node for traceability
+- [x] UV Project Migration (Modern, stable package management)
 
 ---
 
