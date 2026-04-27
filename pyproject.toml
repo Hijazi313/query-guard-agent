@@ -11,4 +11,5 @@ dependencies = [
     "langgraph>=1.1.9",
     "pydantic>=2.13.3",
     "python-dotenv>=1.2.2",
+    "structlog>=25.5.0",
 ]

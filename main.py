@@ -1,4 +1,17 @@
+import structlog
 from dotenv import load_dotenv
+
+_ = load_dotenv()
+
+structlog.configure(
+    processors=[
+        structlog.processors.add_log_level,
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.dev.ConsoleRenderer(),
+    ]
+)
+log = structlog.get_logger()
+
 from typing import TypedDict, Optional, List
 from pydantic import BaseModel, Field
 from langchain_openai import ChatOpenAI
@@ -13,7 +26,6 @@ import json
 
 MAX_RETRY = 2
 
-_ = load_dotenv()
 with open(Path(__file__).parent / "cities.json") as f:
     CITY_DB = json.load(f)
 
@@ -211,8 +223,8 @@ def corrector_router(state: SanitizerState) -> str:
 # Utils
 def debug_wrapper(fn, name):
     def wrapper(state):
-        print(f"\n--- {name} ---")
-        print(state)
+        log.info(f"--- {name} ---")
+        log.info(state)
         return fn(state)
     return wrapper
 def increment_retry(state: SanitizerState) -> SanitizerState:
@@ -271,5 +283,5 @@ initial_state = {
 graph = builder.compile()
 
 result = graph.invoke(initial_state)
-print(result)
+log.info(result)
 

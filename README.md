@@ -54,6 +54,8 @@ The graph routes conditionally based on validation outcome and retry count. Vali
 | Fuzzy matching    | `difflib.get_close_matches`         |
 | State management  | `TypedDict` + LangGraph state       |
 | Package Manager   | UV (Fast Python package installer)  |
+| Logging           | Structlog                           |
+| Observability     | LangSmith (Tracing & Debugging)     |
 
 ---
 
@@ -74,14 +76,23 @@ The validator checks against a static dataset, not the LLM. This makes failures 
 
 ```bash
 # Clone the repository
-git clone https://github.com/Hijazi313/queryguard-agen
-cd queryguard-agent
+git clone https://github.com/Hijazi313/QueryGuard-SanitizeAgent
+cd QueryGuard-SanitizeAgent
+
+# Configure environment
+cp .env.example .env
+# Edit .env and add:
+# OPENAI_API_KEY=your_key
+# LANGSMITH_API_KEY=your_key (optional but recommended)
 
 # Install dependencies and run (using uv)
 uv sync
-cp .env.example .env  # add your OPENAI_API_KEY
 uv run main.py
 ```
+
+## Observability
+
+This project is integrated with **LangSmith** for full-trace observability. To enable tracing, ensure `LANGCHAIN_TRACING_V2=true` and your `LANGSMITH_API_KEY` are set in the `.env` file. This allows you to inspect the agent's decision-making process, LLM inputs/outputs, and graph transitions in real-time.
 
 ---
 
