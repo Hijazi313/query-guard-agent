@@ -40,11 +40,42 @@ process_hitl → validator
 - `hitl` — evaluates rules to prepare the graph state for human intervention
 - `process_hitl` — consumes human input, resets retries, and loops back into validation
 
-**State shape (`SanitizerState`):**
-
-- `raw_query`, `extracted`, `validated`, `errors`, `corrections`, `retry_count`, `llm_city_guess`
-
 The graph routes conditionally based on validation outcome and retry count. Validated results exit early; failed extractions exhaust retries then exit cleanly.
+
+---
+
+## Project Structure
+
+This project follows a professional, modular architecture designed for scalability (May 2026 standards):
+
+```text
+.
+├── agent/                  # Core LangGraph agent package
+│   ├── state.py            # TypedDicts and schemas (SanitizerState, ExtractedInfo)
+│   ├── config.py           # Env loading, LLM initialization, and dataset loading
+│   ├── prompts.py          # ChatPromptTemplates and system prompts
+│   ├── nodes/              # Node functions (pure state mutators)
+│   │   ├── extraction.py
+│   │   ├── validation.py
+│   │   ├── correction.py
+│   │   └── hitl.py
+│   ├── routers.py          # Pure routing logic (typed decisions, no side-effects)
+│   └── graph.py            # StateGraph builder and compilation
+├── api/                    # [Future] REST layer (FastAPI)
+├── evals/                  # [Future] Evaluation layer (RAGAS/LangSmith)
+├── ui/                     # [Future] Next.js 15 Frontend
+├── cities.json             # Static dataset
+└── main.py                 # CLI entrypoint and human-in-the-loop runner
+```
+
+---
+
+## Architectural Guidelines (L6 Critique Standards)
+
+1. **Pure Routers**: Routing functions must be pure. They only read state, return typed strings (Literal edges), and have zero side effects (no API calls, no logging, no state mutation).
+2. **Nodes as Mutators**: Nodes are responsible for taking the current state and returning a dictionary of updates.
+3. **State Integrity**: The `retry_count` is reset whenever a human intervenes to ensure subsequent autocorrect attempts have a full retry budget for the new input.
+4. **State Bleeding Prevention**: Unique `thread_id` generation per session prevents session state from bleeding into concurrent or future runs.
 
 ---
 
@@ -124,6 +155,7 @@ Core pipeline is stable. Planned next:
 - [x] Graceful failure — pipeline never crashes, exits with error state
 - [x] UV Project Migration (Modern, stable package management)
 - [x] **Human-in-the-loop (HITL)** — stateful pauses via `MemorySaver` and `interrupt_before`
+- [x] **Modular Architecture** — production-grade Separation of Concerns (SoC) structure
 
 ---
 
