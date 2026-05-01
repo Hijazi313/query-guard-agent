@@ -12,12 +12,14 @@ structlog.configure(
 )
 log = structlog.get_logger()
 
-from typing import TypedDict, Optional, List
+from typing import TypedDict, Optional, List, Literal
 from pydantic import BaseModel, Field
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import StateGraph, END
 from langchain_core.messages import HumanMessage, SystemMessage  
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.errors import Interrupt
 
 from difflib import get_close_matches, SequenceMatcher
 from pathlib import Path
@@ -44,6 +46,7 @@ Extract the following fields from the user query:
 - city
 - country
 - intent (e.g., weather, population, tourism)
+- confidence: score between 0.0 and 1.0
 
 Rules:
 - Return NULL if not present
@@ -61,7 +64,20 @@ class SanitizerState(TypedDict):
     llm_city_guess: Optional[str] 
     confidence: float  # Added
     source: Optional[str]  # Added
+    awaiting_user: bool = False # Flag to indicate if the graph is waiting for user input.
+    pending_issue: Optional[str] = None  # Why HITL was triggered.  Foe example "LOW_CONFIDENCE" | "CITY_NOT_FOUND" | "EXHAUSTED_RETRIES"
+    hitl_candidates: Optional[List[str]] = None # List of suggested city options shown to the user.
+    user_selection: Optional[str] = None # City selected by the user when resuming.
+    # resume_node: Optional[str] = None # The node where the graph must continue after the user replies.
+    resume_node: Optional[Literal["extractor", "validator", "corrector", "llm_correction", "llm_city_corrector_from_list"]] = None # The node where the graph must continue after the user replies.
+    status: Optional[str]  # "ok" | "low_confidence" | "no_city"
+    score: float
 
+class HITLDecision(TypedDict):
+    should_interrupt: bool
+    reason: Optional[str]
+    candidates: Optional[List[str]]
+    resume_node: Optional[str]
 class LLMCorrection(BaseModel):
     city: Optional[str]
 
@@ -75,15 +91,65 @@ class ExtractedInfo(BaseModel):
 llm_extractor = llm.with_structured_output(ExtractedInfo)
 llm_corrector = llm.with_structured_output(LLMCorrection)
 
+# External Functions
+# Utils
+def build_hitl_message(reason: str, candidates: Optional[List[str]]) -> str:
+    if reason == "CITY_NOT_FOUND":
+        return (
+            "I couldn't find the city in your query. "
+            "Did you mean one of these?"
+        )
+    elif reason == "LOW_CONFIDENCE":
+        return (
+            "I detected a city but I'm not confident. "
+            "Did you mean one of these?"
+        )
+    elif reason == "EXHAUSTED_RETRIES":
+        return (
+            "I'm having trouble understanding the city in your query. "
+            "Did you mean one of these?"
+        )
+    # fallback
+    return "Please confirm your intended city."
+
+def debug_wrapper(fn, name):
+    def wrapper(state):
+        log.info(f"--- {name} ---")
+        log.info(state)
+        return fn(state)
+    return wrapper
+
+
+
+# Nodes    
 def extractor_node(state: SanitizerState) -> SanitizerState:
     try:
+
         response = llm_extractor.invoke(extractor_prompt.format_messages(query=state["raw_query"]))
+        if not response.city:
+            return {
+                **state,
+                "extracted": None,
+                "errors": ["CITY_NOT_FOUND"],
+                "confidence": 0.0,
+                "source": "extraction",
+                "status": "no_city",
+                "score": 0.0,
+                # "pending_issue": "NO_EXTRACTION_DATA",
+                # "awaiting_user": True,
+                # "hitl_candidates": [],
+                # "extracted": None,
+                # "resume_node": "extractor",
+            }
         return {
             **state,
             "extracted": response.model_dump(),
             "errors": [],
-            "confidence": 0.0,  # Initialize
-            "source": "extraction"
+            # "confidence": 0.0,  # Initialize
+            "confidence": response.confidence,  
+            "source": "extraction",
+            "status": "ok" if response.confidence >= 0.8 else "low_confidence",
+            "score": response.confidence
         }
 
 
@@ -221,6 +287,50 @@ def llm_city_corrector_from_list_node(state: SanitizerState):
     except Exception:
         return state
     
+
+def hitl_node(state: SanitizerState):
+    """
+    Prepares the state so your UI/App knows why we paused.
+    """
+    decision = hitl_router(state)
+    return {
+        "awaiting_user": True,
+        "pending_issue": decision["reason"],
+        "hitl_candidates": decision["candidates"],
+        "resume_node": decision["resume_node"]
+    }
+
+def process_hitl_node(state: SanitizerState):
+    """
+    Runs AFTER the user provides input to update the state.
+    """
+    selection = state.get("user_selection")
+    if selection:
+        selection_norm = selection.strip().lower()
+
+        new_extracted = {
+            "city": selection_norm,
+            "country": CITY_DB.get(selection_norm),
+            "intent": state.get("extracted", {}).get("intent") if state.get("extracted") else None,
+            "confidence": 1.0,  # Human answered, so we are 100% confident
+            "source": "hitl"
+        }
+        return {
+            "extracted": new_extracted,
+            "awaiting_user": False,
+            "pending_issue": None,
+            "hitl_candidates": None,
+            "user_selection": None, # Clear the input
+            "errors": [],
+            "validated": False, # Send back to validator to be safe
+            "retry_count": 0    # L6 Critique Fix: Reset retries so if human makes a typo, autocorrect runs again!
+        }
+    return state
+
+def increment_retry_node(state: SanitizerState) -> SanitizerState:
+    if state["errors"]:
+        return {**state, "retry_count": state["retry_count"] + 1}
+    return state
     
 
     
@@ -257,32 +367,82 @@ def corrector_router(state: SanitizerState) -> str:
     return "end"
 
 def llm_city_corrector_from_list_router(state: SanitizerState) -> str:
-    # After final fallback, we always end
+    # L6 Critique Fix: You must actually EVALUATE the hitl_router here!
+    if hitl_router(state)["should_interrupt"]:
+        return "hitl"
     return "end"
+    
+def hitl_router(state: SanitizerState) -> HITLDecision:
+    # 1. Extractor returned no city at all
+    if state["extracted"] is None or not state["extracted"].get("city"):
+        guess = state.get("llm_city_guess")
+        candidates = [guess] if guess else []
+        return HITLDecision(
+            should_interrupt=True,
+            reason="CITY_NOT_FOUND",
+            # candidates=[state["llm_city_guess"]],
+            # candidates= state.get("llm_city_guess") and [state["llm_city_guess"]],
+            candidates= candidates,
+            # resume_node="corrector",
+            resume_node="extractor",
+        )
+    if  state["validated"]== False and state["retry_count"] >= MAX_RETRY:
+        return HITLDecision(
+            should_interrupt=True,
+            reason="EXHAUSTED_RETRIES",
+            candidates= state.get("llm_city_guess") and [state["llm_city_guess"]],
+            resume_node="extractor",
+        )
+    #    return interrupt("CITY_NOT_FOUND", candidates=[state["llm_city_guess"]], 
+    #    )
+     # 2. Extractor has a city but confidence too low
+    if state["confidence"] < 0.6:
+        # return interrupt("LOW_CONFIDENCE", candidates=[state["llm_city_guess"]])
+        candidate= state.get("llm_city_guess")
+        candidates = [candidate] if candidate else CITY_KEYS[:3] # send only 3 candidates to avoid overwhelming the user
 
-# Utils
-def debug_wrapper(fn, name):
-    def wrapper(state):
-        log.info(f"--- {name} ---")
-        log.info(state)
-        return fn(state)
-    return wrapper
-def increment_retry(state: SanitizerState) -> SanitizerState:
-    if state["errors"]:
-        return {**state, "retry_count": state["retry_count"] + 1}
-    return state
+        return HITLDecision(
+            should_interrupt=True,
+            reason="LOW_CONFIDENCE",
+            candidates=candidates,
+            resume_node="extractor",
+        )
+    
+     # 3. Otherwise continue
+    return {
+        "should_interrupt": False,
+        "reason": None,
+        "candidates": None,
+        "resume_node": None
+    }
+
+
+
 builder = StateGraph(SanitizerState)
 
 builder.add_node("extractor", debug_wrapper(extractor_node, "extractor"))
 builder.add_node("validator", debug_wrapper(validator_node, "validator"))
 builder.add_node("corrector", debug_wrapper(corrector_node, "corrector"))
 builder.add_node("llm_correction", debug_wrapper(llm_correction_node, "llm_correction"))
-builder.add_node("increment_retry",debug_wrapper(increment_retry, "increment_retry"))
+builder.add_node("increment_retry",debug_wrapper(increment_retry_node, "increment_retry"))
 builder.add_node("llm_city_corrector_from_list",debug_wrapper(llm_city_corrector_from_list_node, "llm_city_corrector_from_list"))
+builder.add_node("hitl", debug_wrapper(hitl_node, "hitl"))
+builder.add_node("process_hitl", debug_wrapper(process_hitl_node, "process_hitl"))
+
+builder.add_edge("hitl", "process_hitl")
+builder.add_edge("process_hitl", "validator")
 
 builder.set_entry_point("extractor")
 # # linear flow
-builder.add_edge("extractor", "validator")
+# builder.add_edge("extractor", "validator")
+builder.add_conditional_edges(
+    "extractor", 
+    lambda state: "hitl" if hitl_router(state)["should_interrupt"] else "validator",
+    {
+        "hitl": "hitl",
+        "validator": "validator",
+    }   
+)
 builder.add_edge("llm_correction", "increment_retry")
 builder.add_edge("increment_retry", "validator")
 
@@ -291,9 +451,10 @@ builder.add_conditional_edges(
     "validator",
     validation_router,
     {
+        "hitl": "hitl",
         "end": END,
-        "llm_city_corrector_from_list": "llm_city_corrector_from_list",
         "corrector": "corrector",
+        "llm_city_corrector_from_list": "llm_city_corrector_from_list",
     }
 )
 
@@ -301,6 +462,7 @@ builder.add_conditional_edges(
     "corrector",
     corrector_router,
     {
+        "hitl": "hitl",
         "llm_correction": "llm_correction",
         "llm_city_corrector_from_list": "llm_city_corrector_from_list",
         "validation": "validator",
@@ -312,8 +474,10 @@ builder.add_conditional_edges(
     llm_city_corrector_from_list_router,
     {
         "end": END,
+        "hitl": "hitl",
     }
 )
+
 
 
 
@@ -321,7 +485,9 @@ builder.add_conditional_edges(
     
 initial_state = {
     # "raw_query": "Tell me weather in Duabioi",
-    "raw_query": "The capital of punjab Pakistan",
+    # "raw_query": "The capital of punjab Pakistan",
+    # "raw_query": "weather in Duaawbiiii",
+    "raw_query": "How's the weather",
     "extracted": None,
     "validated": False,
     "errors": [],
@@ -329,11 +495,57 @@ initial_state = {
     "retry_count": 0,
     "llm_city_guess": None, 
     "confidence": 0.0,
-    "source": None
+    "source": None,
+    "awaiting_user": False,
+    "pending_issue": None,
+    "hitl_candidates": None,
+    "user_selection": None,
+    "resume_node": None,
 }
+import uuid
 
-graph = builder.compile()
+graph_memory = MemorySaver()
+graph = builder.compile(checkpointer=graph_memory, interrupt_before=["process_hitl"])
 
-result = graph.invoke(initial_state)
-log.info(result)
+# L6 Critique Fix: Generate a unique thread ID per run to avoid state bleeding across executions.
+session_id = str(uuid.uuid4())
+config = {"configurable": {"thread_id": session_id}}
 
+print(f"--- Starting Agent Session: {session_id} ---")
+
+# L6 Critique Fix: A robust runner must be a loop. The graph might pause multiple times 
+# if the user provides invalid input sequentially.
+user_input = None
+while True:
+    if user_input is None:
+        # Initial run
+        result = graph.invoke(initial_state, config)
+    else:
+        # Resuming run with state injected
+        graph.update_state(config, {"user_selection": user_input})
+        result = graph.invoke(None, config)
+
+    snapshot = graph.get_state(config)
+    
+    # Check if the graph is paused waiting for process_hitl
+    if snapshot.next and "process_hitl" in snapshot.next:
+        print("\n[!] 🛑 Graph Paused! Human Intervention Required.")
+        print(f"Reason: {snapshot.values.get('pending_issue')}")
+        
+        candidates = snapshot.values.get('hitl_candidates')
+        if candidates:
+            print(f"Did you mean one of these? {', '.join(candidates)}")
+            
+        # Blocking terminal input
+        user_input = input("\nEnter city name (or type 'quit' to exit): ").strip()
+        
+        if user_input.lower() in ['quit', 'exit', 'q']:
+            print("Exiting pipeline...")
+            break
+            
+        print(f"\n--- Resuming graph with: '{user_input}' ---")
+    else:
+        # Graph reached the END
+        print("\n✅ Graph Execution Complete.")
+        print("Final Extracted Data:", snapshot.values.get("extracted"))
+        break

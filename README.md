@@ -21,10 +21,12 @@ The agent doesn't just extract. If extraction fails validation, it attempts corr
 
 The pipeline is a directed LangGraph graph with conditional routing:
 
-```
+```text
 extractor → validator → [corrector → increment_retry → validator → ...]
-                  ↘ [llm_correction → increment_retry → validator → ...]
-                  ↘ [llm_city_corrector_from_list → END]
+    ↘             ↘ [llm_correction → increment_retry → validator → ...]
+   hitl             ↘ [llm_city_corrector_from_list → hitl]
+    ↓
+process_hitl → validator
 ```
 
 **Nodes:**
@@ -35,6 +37,8 @@ extractor → validator → [corrector → increment_retry → validator → ...
 - `llm_correction` — general LLM-based city name inference for semantic errors
 - `llm_city_corrector_from_list` — constrained LLM fallback using top-10 fuzzy candidates
 - `increment_retry` — guards against infinite loops (MAX_RETRY = 2)
+- `hitl` — evaluates rules to prepare the graph state for human intervention
+- `process_hitl` — consumes human input, resets retries, and loops back into validation
 
 **State shape (`SanitizerState`):**
 
@@ -83,7 +87,7 @@ cd QueryGuard-SanitizeAgent
 cp .env.example .env
 # Edit .env and add:
 # OPENAI_API_KEY=your_key
-# LANGSMITH_API_KEY=your_key (optional but recommended)
+# LANGCHAIN_API_KEY=your_key (optional but recommended)
 
 # Install dependencies and run (using uv)
 uv sync
@@ -92,7 +96,7 @@ uv run main.py
 
 ## Observability
 
-This project is integrated with **LangSmith** for full-trace observability. To enable tracing, ensure `LANGCHAIN_TRACING_V2=true` and your `LANGSMITH_API_KEY` are set in the `.env` file. This allows you to inspect the agent's decision-making process, LLM inputs/outputs, and graph transitions in real-time.
+This project is integrated with **LangSmith** for full-trace observability. To enable tracing, ensure `LANGCHAIN_TRACING_V2=true` and your `LANGCHAIN_API_KEY` are set in the `.env` file. This allows you to inspect the agent's decision-making process, LLM inputs/outputs, and graph transitions in real-time.
 
 ---
 
@@ -119,27 +123,11 @@ Core pipeline is stable. Planned next:
 - [x] Retry counter guard (MAX_RETRY) to prevent infinite loops
 - [x] Graceful failure — pipeline never crashes, exits with error state
 - [x] UV Project Migration (Modern, stable package management)
+- [x] **Human-in-the-loop (HITL)** — stateful pauses via `MemorySaver` and `interrupt_before`
 
 ---
 
 ### Planned
-
-#### Human-in-the-loop (HITL) node
-
-When the pipeline exhausts retries or confidence is too low, instead of
-silently failing, interrupt the graph and ask the user:
-
-```
-Could not confidently identify the city in your query.
-Did you mean one of these?
-  [1] Dubai (UAE)
-  [2] Doha (Qatar)
-  [3] Enter manually
-```
-
-LangGraph supports this natively via interrupt() — the graph pauses,
-waits for external input, then resumes from the same state.
-No restart, no lost context.
 
 #### Real geocoding API integration
 
